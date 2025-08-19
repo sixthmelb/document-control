@@ -40,18 +40,23 @@ Route::get('/departments/{department}/documents', [PublicController::class, 'dep
 Route::get('/api/departments/{department}/sections', [PublicController::class, 'getSectionsByDepartment'])
     ->name('api.departments.sections');
 
-// QR Code Routes
 Route::prefix('qr')->name('qr.')->group(function () {
-    // QR Code Validation
+    // Public QR validation
     Route::get('/validate/{document}/{token}', [QrValidationController::class, 'validate'])->name('validate');
     Route::get('/scanner', [QrValidationController::class, 'scanner'])->name('scanner');
     Route::get('/help', [QrValidationController::class, 'help'])->name('help');
     
-    // API Routes for QR Validation
+    // API Routes for QR
     Route::prefix('api')->name('api.')->group(function () {
         Route::get('/validate/{document}/{token}', [QrValidationController::class, 'validateApi'])->name('validate');
         Route::post('/validate', [QrValidationController::class, 'validateQrData'])->name('validate.data');
         Route::get('/statistics', [QrValidationController::class, 'statistics'])->name('statistics');
+    });
+    
+    // Admin QR management (protected)
+    Route::middleware(['auth', 'can:approve-documents'])->group(function () {
+        Route::post('/generate/{document}', [QrValidationController::class, 'generate'])->name('generate');
+        Route::post('/regenerate/{document}', [QrValidationController::class, 'regenerate'])->name('regenerate');
     });
 });
 

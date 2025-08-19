@@ -1,0 +1,267 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\Document;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use SimpleSoftwareIO\QrCode\Facades\QrCode;
+
+class QrCodeService
+{
+    /**
+     * Generate QR code for document.
+     */
+    public function generateForDocument(Document $document): bool
+    {
+        try {
+            if (!$document->isPublished()) {
+                throw new \InvalidArgumentException('Only published documents can have QR codes generated');
+            }
+
+            // Generate QR code data/URL
+            $qrData = $this->generateQrData($document);
+            
+            // Generate QR code image
+            $qrCodeImage = $this->generateQrCodeImage($qrData);
+            
+            // Store QR code
+            $qrCodePath = $this->storeQrCode($document, $qrCodeImage);
+            
+            // Update document with QR code path
+            $document->update([
+                'qr_code_path' => $qrCodePath,
+                'qr_code_token' => $this->generateQrToken($document),
+            ]);
+
+            Log::info("QR code generated successfully for document {$document->id}");
+            return true;
+
+        } catch (\Exception $e) {
+            Log::error("QR code generation failed for document {$document->id}: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Regenerate QR code for document.
+     */
+    public function regenerateForDocument(Document $document): bool
+    {
+        try {
+            // Delete old QR code if exists
+            if ($document->qr_code_path && Storage::disk('qrcodes')->exists($document->qr_code_path)) {
+                Storage::disk('qrcodes')->delete($document->qr_code_path);
+            }
+
+            // Generate new QR code
+            return $this->generateForDocument($document);
+
+        } catch (\Exception $e) {
+            Log::error("QR code regeneration failed for document {$document->id}: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Validate QR code for document.
+     */
+    public function validateQrCode(Document $document, string $token): bool
+    {
+        try {
+            // Check if document is published
+            if (!$document->isPublished()) {
+                return false;
+            }
+
+            // Check if token matches
+            if ($document->qr_code_token !== $token) {
+                return false;
+            }
+
+            // Check if QR code file exists
+            if (!$document->qr_code_path || !Storage::disk('qrcodes')->exists($document->qr_code_path)) {
+                return false;
+            }
+
+            return true;
+
+        } catch (\Exception $e) {
+            Log::error("QR code validation failed for document {$document->id}: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Get QR code URL for document.
+     */
+    public function getQrCodeUrl(Document $document): ?string
+    {
+        if (!$document->qr_code_path || !Storage::disk('qrcodes')->exists($document->qr_code_path)) {
+            return null;
+        }
+
+        return Storage::disk('qrcodes')->url($document->qr_code_path);
+    }
+
+    /**
+     * Generate QR code data/URL.
+     */
+    protected function generateQrData(Document $document): string
+    {
+        $token = $this->generateQrToken($document);
+        
+        // Create validation URL
+        $baseUrl = config('app.url');
+        $validationUrl = "{$baseUrl}/qr/validate/{$document->id}/{$token}";
+        
+        return $validationUrl;
+    }
+
+    /**
+     * Generate unique QR token for document.
+     */
+    protected function generateQrToken(Document $document): string
+    {
+        // Generate secure token based on document data
+        $data = $document->id . $document->file_hash . $document->published_at . config('app.key');
+        return hash('sha256', $data);
+    }
+
+    /**
+     * Generate QR code image.
+     */
+    protected function generateQrCodeImage(string $data): string
+    {
+        try {
+            // Generate QR code with custom styling
+            $qrCode = QrCode::format('png')
+                ->size(300)
+                ->margin(2)
+                ->errorCorrection('M')
+                ->generate($data);
+
+            return $qrCode;
+
+        } catch (\Exception $e) {
+            Log::error("QR code image generation failed: " . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
+     * Store QR code to storage.
+     */
+    protected function storeQrCode(Document $document, string $qrCodeImage): string
+    {
+        try {
+            // Generate filename
+            $filename = 'qr_' . $document->id . '_' . now()->format('YmdHis') . '.png';
+            $folderPath = now()->format('Y/m');
+            $fullPath = $folderPath . '/' . $filename;
+
+            // Ensure directory exists
+            Storage::disk('qrcodes')->makeDirectory($folderPath);
+
+            // Store QR code
+            if (Storage::disk('qrcodes')->put($fullPath, $qrCodeImage)) {
+                return $fullPath;
+            } else {
+                throw new \Exception('Failed to store QR code to disk');
+            }
+
+        } catch (\Exception $e) {
+            Log::error("QR code storage failed: " . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
+     * Delete QR code for document.
+     */
+    public function deleteQrCode(Document $document): bool
+    {
+        try {
+            if ($document->qr_code_path && Storage::disk('qrcodes')->exists($document->qr_code_path)) {
+                Storage::disk('qrcodes')->delete($document->qr_code_path);
+                
+                $document->update([
+                    'qr_code_path' => null,
+                    'qr_code_token' => null,
+                ]);
+
+                Log::info("QR code deleted for document {$document->id}");
+                return true;
+            }
+
+            return true; // Nothing to delete
+
+        } catch (\Exception $e) {
+            Log::error("QR code deletion failed for document {$document->id}: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Get QR code statistics.
+     */
+    public function getQrCodeStats(): array
+    {
+        try {
+            $totalDocuments = Document::where('status', 'published')->count();
+            $documentsWithQr = Document::whereNotNull('qr_code_path')->count();
+            $qrFiles = collect(Storage::disk('qrcodes')->allFiles())->count();
+
+            return [
+                'total_published_documents' => $totalDocuments,
+                'documents_with_qr' => $documentsWithQr,
+                'qr_files_stored' => $qrFiles,
+                'coverage_percentage' => $totalDocuments > 0 ? round(($documentsWithQr / $totalDocuments) * 100, 2) : 0,
+            ];
+
+        } catch (\Exception $e) {
+            Log::error("QR code stats generation failed: " . $e->getMessage());
+            return [
+                'total_published_documents' => 0,
+                'documents_with_qr' => 0,
+                'qr_files_stored' => 0,
+                'coverage_percentage' => 0,
+            ];
+        }
+    }
+
+    /**
+     * Bulk generate QR codes for all published documents without QR codes.
+     */
+    public function bulkGenerateQrCodes(): array
+    {
+        $documents = Document::where('status', 'published')
+            ->whereNull('qr_code_path')
+            ->get();
+
+        $results = [
+            'total' => $documents->count(),
+            'success' => 0,
+            'failed' => 0,
+            'errors' => []
+        ];
+
+        foreach ($documents as $document) {
+            try {
+                if ($this->generateForDocument($document)) {
+                    $results['success']++;
+                } else {
+                    $results['failed']++;
+                    $results['errors'][] = "Failed to generate QR for document {$document->id}";
+                }
+            } catch (\Exception $e) {
+                $results['failed']++;
+                $results['errors'][] = "Document {$document->id}: " . $e->getMessage();
+            }
+        }
+
+        Log::info("Bulk QR code generation completed", $results);
+        return $results;
+    }
+}
